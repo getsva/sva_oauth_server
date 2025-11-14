@@ -1,0 +1,13 @@
+Django
+djangorestframework
+django-cors-headers
+django-allauth
+dj-rest-auth
+djangorestframework-simplejwt
+python-dotenv
+Pillow
+psycopg2-binary
+requests
+cryptography
+PyJWT>=2.8.0
+

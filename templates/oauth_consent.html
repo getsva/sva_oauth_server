@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Authorize Application - SVA OAuth</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .consent-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 500px;
+            width: 100%;
+            padding: 40px;
+        }
+        .logo {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .logo h1 {
+            color: #667eea;
+            font-size: 28px;
+            font-weight: 600;
+        }
+        .app-info {
+            background: #f7f9fc;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+        .app-name {
+            font-size: 20px;
+            font-weight: 600;
+            color: #1a202c;
+            margin-bottom: 8px;
+        }
+        .app-meta {
+            color: #718096;
+            font-size: 14px;
+        }
+        .scopes {
+            margin-bottom: 30px;
+        }
+        .scopes h3 {
+            font-size: 16px;
+            color: #2d3748;
+            margin-bottom: 16px;
+        }
+        .scope-item {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            background: #f7f9fc;
+            border-radius: 6px;
+            margin-bottom: 8px;
+        }
+        .scope-item:last-child {
+            margin-bottom: 0;
+        }
+        .scope-icon {
+            width: 32px;
+            height: 32px;
+            margin-right: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #e0e7ff;
+            border-radius: 50%;
+            font-size: 18px;
+            flex-shrink: 0;
+        }
+        .scope-icon svg {
+            width: 20px;
+            height: 20px;
+            color: #667eea;
+        }
+        .scope-text {
+            flex: 1;
+        }
+        .scope-name {
+            font-weight: 500;
+            color: #2d3748;
+            margin-bottom: 2px;
+        }
+        .scope-desc {
+            font-size: 13px;
+            color: #718096;
+        }
+        .scope-reason {
+            font-size: 12px;
+            color: #a0aec0;
+            font-style: italic;
+            margin-top: 4px;
+        }
+        .actions {
+            display: flex;
+            gap: 12px;
+        }
+        .btn {
+            flex: 1;
+            padding: 14px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        .btn-secondary {
+            background: #e2e8f0;
+            color: #4a5568;
+        }
+        .btn-secondary:hover {
+            background: #cbd5e0;
+        }
+        .redirect-uri {
+            font-size: 12px;
+            color: #a0aec0;
+            margin-top: 20px;
+            text-align: center;
+            word-break: break-all;
+        }
+    </style>
+</head>
+<body>
+    <div class="consent-container">
+        <div class="logo">
+            {% if consent_screen and consent_screen.app_logo %}
+            <img src="{{ consent_screen.app_logo }}" alt="{{ consent_screen.app_name }}" style="max-width: 80px; max-height: 80px; margin-bottom: 10px;">
+            {% endif %}
+            <h1>{% if consent_screen %}{{ consent_screen.app_name }}{% else %}SVA OAuth{% endif %}</h1>
+        </div>
+        
+        <div class="app-info">
+            <div class="app-name">{% if consent_screen %}{{ consent_screen.app_name }}{% else %}{{ oauth_app.name }}{% endif %}</div>
+            <div class="app-meta">wants to access your account</div>
+            {% if consent_screen and consent_screen.application_homepage %}
+            <div class="app-meta" style="margin-top: 8px;">
+                <a href="{{ consent_screen.application_homepage }}" target="_blank" style="color: #667eea; text-decoration: none;">Visit application</a>
+            </div>
+            {% endif %}
+        </div>
+        
+        <div class="scopes">
+            <h3>This application will be able to:</h3>
+            {% for scope in scopes %}
+            <div class="scope-item">
+                <div class="scope-icon">
+                    {% if scope.icon %}
+                        {{ scope.icon }}
+                    {% else %}
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                    {% endif %}
+                </div>
+                <div class="scope-text">
+                    <div class="scope-name">{{ scope.name }}</div>
+                    <div class="scope-desc">{{ scope.description }}</div>
+                    {% if scope.reason %}
+                    <div class="scope-reason">Reason: {{ scope.reason }}</div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        
+        <form method="POST">
+            {% csrf_token %}
+            <div class="actions">
+                <button type="submit" name="action" value="deny" class="btn btn-secondary">Deny</button>
+                <button type="submit" name="action" value="approve" class="btn btn-primary">Authorize</button>
+            </div>
+        </form>
+        
+        <div class="redirect-uri">
+            Redirecting to: {{ redirect_uri }}
+        </div>
+        
+        {% if consent_screen %}
+        <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e2e8f0; font-size: 12px; color: #718096;">
+            {% if consent_screen.privacy_policy_url or consent_screen.terms_of_service_url %}
+            <div style="margin-bottom: 8px;">
+                {% if consent_screen.privacy_policy_url %}
+                <a href="{{ consent_screen.privacy_policy_url }}" target="_blank" style="color: #667eea; text-decoration: none; margin-right: 12px;">Privacy Policy</a>
+                {% endif %}
+                {% if consent_screen.terms_of_service_url %}
+                <a href="{{ consent_screen.terms_of_service_url }}" target="_blank" style="color: #667eea; text-decoration: none;">Terms of Service</a>
+                {% endif %}
+            </div>
+            {% endif %}
+            <div>
+                Support: <a href="mailto:{{ consent_screen.support_email }}" style="color: #667eea; text-decoration: none;">{{ consent_screen.support_email }}</a>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</body>
+</html>
+
