@@ -6,6 +6,7 @@ import warnings
 from pathlib import Path
 from datetime import timedelta
 from dotenv import load_dotenv
+import dj_database_url
 
 load_dotenv()
 
@@ -31,6 +32,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
+# SECURITY WARNING: don't run with debug turned on in production!
+# Define DEBUG first as it's used in SECRET_KEY validation below
+DEBUG = os.getenv('DEBUG', 'False') == 'True'
+
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv('SECRET_KEY')
 if not SECRET_KEY:
@@ -49,9 +54,10 @@ if not SECRET_KEY:
             'Generate a secure key using: python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"'
         )
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('DEBUG', 'False') == 'True'
-
+# ALLOWED_HOSTS - must include your Azure App Service domain
+# For Azure App Service, you MUST set this in environment variables:
+# ALLOWED_HOSTS=oauth-api.azurewebsites.net,oauth-api.getsva.com
+# Or set it in Azure Portal > Configuration > Application Settings
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 if not DEBUG:
     # In production, ensure ALLOWED_HOSTS is properly configured
@@ -90,9 +96,10 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # Serve static files efficiently in production
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
+    'config.middleware.HealthCheckCommonMiddleware',  # Custom middleware to prevent redirect loops
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'allauth.account.middleware.AccountMiddleware',
@@ -128,25 +135,25 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/5.0/ref/settings/#databases
-
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+# Use a default SQLite database if DATABASE_URL is not set (useful for collectstatic, migrations, etc.)
+# In production, DATABASE_URL should always be set
+database_url = os.getenv('DATABASE_URL', '')
+if database_url:
+    DATABASES = {
+        'default': dj_database_url.config(
+            default=database_url,
+            conn_max_age=600,
+            ssl_require=os.getenv('DB_SSL_REQUIRE', 'False') == 'True'
+        )
     }
-}
-
-# If PostgreSQL is preferred, uncomment and configure:
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         'NAME': os.getenv('DB_NAME', 'sva_oauth'),
-#         'USER': os.getenv('DB_USER', 'postgres'),
-#         'PASSWORD': os.getenv('DB_PASSWORD', ''),
-#         'HOST': os.getenv('DB_HOST', 'localhost'),
-#         'PORT': os.getenv('DB_PORT', '5432'),
-#     }
-# }
+else:
+    # Fallback to SQLite for development or when DATABASE_URL is not set (e.g., during collectstatic)
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 
 # Custom User Model
@@ -186,10 +193,14 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.0/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-MEDIA_URL = 'media/'
+# WhiteNoise configuration for serving static files in production
+# WhiteNoise allows your Django app to serve its own static files efficiently
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
+MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
@@ -334,6 +345,12 @@ if not DEBUG and not CORS_ALLOWED_ORIGINS:
 
 # Security settings for production
 if not DEBUG:
+    # CRITICAL: Tell Django to trust Azure App Service's reverse proxy headers
+    # Azure App Service sits behind a reverse proxy, and Django needs to know
+    # that requests are already HTTPS by checking the X-Forwarded-Proto header.
+    # Without this, SECURE_SSL_REDIRECT will cause infinite redirect loops.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    
     SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'True') == 'True'  # Default to True in production
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True

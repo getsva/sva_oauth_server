@@ -8,8 +8,15 @@ from django.conf.urls.static import static
 from accounts.oauth_views import GoogleOAuth2LoginView, GitHubOAuth2LoginView
 from accounts.oauth_callback_view import google_oauth_callback, github_oauth_callback
 from accounts.account_views import CustomSocialSignupView
+from .views import HealthCheckView
 
 urlpatterns = [
+    # Health check endpoints
+    # Primary: /health (standard practice, avoids root path issues)
+    path('health', HealthCheckView.as_view(), name='health_check'),
+    path('health/', HealthCheckView.as_view(), name='health_check_slash'),
+    # Secondary: root path (for Azure App Service default health checks)
+    path('', HealthCheckView.as_view(), name='health_check_root'),
     path('admin/', admin.site.urls),
     path('api/auth/', include('accounts.urls')),
     # Override django-allauth OAuth views with custom ones that redirect immediately
