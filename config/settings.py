@@ -1,14 +1,75 @@
 """
 Django settings for sva-o-auth project.
+
+Environment Configuration:
+---------------------------
+This settings file automatically configures itself based on the ENVIRONMENT variable.
+You can use separate .env files for different environments:
+
+1. For Local Development:
+   - Use .env.local file
+   - Or set ENVIRONMENT=development system environment variable
+   - DEBUG will be automatically set to True
+   - Console email backend will be used
+   - Less strict security settings
+
+2. For Production:
+   - Use .env.production file
+   - Or set ENVIRONMENT=production system environment variable
+   - DEBUG will be automatically set to False (security requirement)
+   - SMTP email backend will be used
+   - Production security settings will be enabled (HTTPS, secure cookies, etc.)
+
+File Loading Priority:
+- System environment variable ENVIRONMENT takes precedence
+- Then loads .env.local (development) or .env.production (production)
+- Falls back to .env if environment-specific file doesn't exist
+
+All environment variables should be defined in the appropriate .env file.
 """
 import os
 import warnings
 from pathlib import Path
 from datetime import timedelta
-from dotenv import load_dotenv
+import environ
 import dj_database_url
 
-load_dotenv()
+# --- Environment Variable Setup ---
+env = environ.Env(
+    DEBUG=(bool, False),
+    ENVIRONMENT=(str, 'development')
+)
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+# --- Environment Detection ---
+# First, try to get ENVIRONMENT from system environment variable (for deployment platforms)
+# Then try to read from .env file, then from environment-specific files
+ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development').lower()
+
+# Load environment-specific .env file
+# Priority: .env.local (development) or .env.production (production)
+# Fallback to .env if environment-specific file doesn't exist
+if ENVIRONMENT == 'production':
+    env_file = BASE_DIR / '.env.production'
+    if not env_file.exists():
+        # Fallback to .env if .env.production doesn't exist
+        env_file = BASE_DIR / '.env'
+else:
+    # Development environment
+    env_file = BASE_DIR / '.env.local'
+    if not env_file.exists():
+        # Fallback to .env if .env.local doesn't exist
+        env_file = BASE_DIR / '.env'
+
+# Read the appropriate .env file
+if env_file.exists():
+    environ.Env.read_env(env_file)
+    # Re-read ENVIRONMENT from the loaded file (it may override the system env)
+    ENVIRONMENT = env('ENVIRONMENT', default=ENVIRONMENT).lower()
+
+IS_PRODUCTION = ENVIRONMENT == 'production'
+IS_DEVELOPMENT = ENVIRONMENT == 'development'
 
 # Suppress deprecation warnings from dj_rest_auth using deprecated django-allauth settings
 # These warnings are from dj_rest_auth library code (version 7.0.1), not our code
@@ -32,38 +93,26 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
-# SECURITY WARNING: don't run with debug turned on in production!
-# Define DEBUG first as it's used in SECRET_KEY validation below
-DEBUG = os.getenv('DEBUG', 'False') == 'True'
+# --- Core Django Settings ---
+# Auto-configure DEBUG based on environment if not explicitly set
+# In production, DEBUG should always be False for security
+if 'DEBUG' in os.environ:
+    DEBUG = env('DEBUG')
+else:
+    DEBUG = IS_DEVELOPMENT  # Auto-set based on environment
+
+# Ensure DEBUG is False in production (security requirement)
+if IS_PRODUCTION:
+    DEBUG = False
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv('SECRET_KEY')
-if not SECRET_KEY:
-    if DEBUG:
-        # Only allow None in development with explicit warning
-        import warnings
-        warnings.warn(
-            'SECRET_KEY is not set! Using a temporary key for development only. '
-            'Set SECRET_KEY environment variable for production.',
-            UserWarning
-        )
-        SECRET_KEY = 'django-insecure-dev-key-change-in-production-' + os.urandom(32).hex()
-    else:
-        raise ValueError(
-            'SECRET_KEY environment variable must be set in production! '
-            'Generate a secure key using: python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"'
-        )
+SECRET_KEY = env('DJANGO_SECRET_KEY', default='django-insecure-default-key-for-dev') # Added default for safety
 
 # ALLOWED_HOSTS - must include your Azure App Service domain
 # For Azure App Service, you MUST set this in environment variables:
 # ALLOWED_HOSTS=oauth-api.azurewebsites.net,oauth-api.getsva.com
 # Or set it in Azure Portal > Configuration > Application Settings
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
-if not DEBUG:
-    # In production, ensure ALLOWED_HOSTS is properly configured
-    if not ALLOWED_HOSTS or ALLOWED_HOSTS == ['localhost', '127.0.0.1']:
-        import warnings
-        warnings.warn('ALLOWED_HOSTS should be configured for production!')
+ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['127.0.0.1', 'localhost'])
 
 
 # Application definition
@@ -133,17 +182,16 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 
-# Database
-# https://docs.djangoproject.com/en/5.0/ref/settings/#databases
+# --- Database ---
 # Use a default SQLite database if DATABASE_URL is not set (useful for collectstatic, migrations, etc.)
 # In production, DATABASE_URL should always be set
-database_url = os.getenv('DATABASE_URL', '')
+database_url = env('DATABASE_URL', default='')
 if database_url:
     DATABASES = {
         'default': dj_database_url.config(
             default=database_url,
             conn_max_age=600,
-            ssl_require=os.getenv('DB_SSL_REQUIRE', 'False') == 'True'
+            ssl_require=env('DB_SSL_REQUIRE', default=False, cast=bool)
         )
     }
 else:
@@ -254,68 +302,55 @@ REST_FRAMEWORK = {
     ),
 }
 
-# Internal orchestration defaults
-# CRITICAL: These must be set in production via environment variables
-INTERNAL_SERVICE_TOKEN = os.getenv('INTERNAL_SERVICE_TOKEN')
-if not INTERNAL_SERVICE_TOKEN:
-    if DEBUG:
-        INTERNAL_SERVICE_TOKEN = 'dev-shared-secret-change-in-production'
-        import warnings
-        warnings.warn('INTERNAL_SERVICE_TOKEN not set, using insecure default for development only!', UserWarning)
-    else:
-        raise ValueError('INTERNAL_SERVICE_TOKEN environment variable must be set in production!')
+# --- Internal Service-to-Service Communication ---
+INTERNAL_SERVICE_TOKEN = env('INTERNAL_SERVICE_TOKEN', default='dev-shared-secret')
+INTERNAL_SERVICE_HEADER = env('INTERNAL_SERVICE_HEADER', default='X-Service-Token')
 
-INTERNAL_SERVICE_HEADER = os.getenv('INTERNAL_SERVICE_HEADER', 'X-Service-Token')
+# DATA_TOKEN_SECRET must match sva_server backend - use same default for local development
+DATA_TOKEN_SECRET = env('DATA_TOKEN_SECRET', default='dev-data-token-secret')
+DATA_TOKEN_ALGORITHM = env('DATA_TOKEN_ALGORITHM', default='HS256')
+DATA_TOKEN_TTL_SECONDS = env.int('DATA_TOKEN_TTL_SECONDS', default=300)
+DATA_TOKEN_ISSUER = env('DATA_TOKEN_ISSUER', default='sva_oauth')
+INTERNAL_SERVICE_TIMEOUT = env.int('INTERNAL_SERVICE_TIMEOUT', default=5)
 
-DATA_TOKEN_SECRET = os.getenv('DATA_TOKEN_SECRET')
-if not DATA_TOKEN_SECRET:
-    if DEBUG:
-        DATA_TOKEN_SECRET = 'dev-data-token-secret-change-in-production'
-        import warnings
-        warnings.warn('DATA_TOKEN_SECRET not set, using insecure default for development only!', UserWarning)
-    else:
-        raise ValueError('DATA_TOKEN_SECRET environment variable must be set in production!')
-
-DATA_TOKEN_ALGORITHM = os.getenv('DATA_TOKEN_ALGORITHM', 'HS256')
-# Use local development URL when DEBUG is True, otherwise use production URL
-if DEBUG:
-    CORE_CONSENT_URL = os.getenv('CORE_CONSENT_URL', 'http://localhost:8080/consent')
+# Configure consent URL based on environment
+if IS_DEVELOPMENT:
+    CORE_CONSENT_URL = env('CORE_CONSENT_URL', default='http://localhost:8080/consent')
 else:
-    CORE_CONSENT_URL = os.getenv('CORE_CONSENT_URL', 'https://app.getsva.com/consent')
-AUTHORIZATION_REQUEST_TTL_SECONDS = int(os.getenv('AUTHORIZATION_REQUEST_TTL_SECONDS', '600'))
+    # Production: use environment variable or default production URL
+    CORE_CONSENT_URL = env('CORE_CONSENT_URL', default='https://app.getsva.com/consent')
+AUTHORIZATION_REQUEST_TTL_SECONDS = env.int('AUTHORIZATION_REQUEST_TTL_SECONDS', default=600)
 
 # JWT Settings
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
-    'ROTATE_REFRESH_TOKENS': True,
-    'BLACKLIST_AFTER_ROTATION': True,
-    'UPDATE_LAST_LOGIN': True,
-    'ALGORITHM': 'HS256',
+    'ACCESS_TOKEN_LIFETIME': timedelta(
+        hours=env.int('JWT_ACCESS_TOKEN_LIFETIME_HOURS', default=1)
+    ),
+    'REFRESH_TOKEN_LIFETIME': timedelta(
+        days=env.int('JWT_REFRESH_TOKEN_LIFETIME_DAYS', default=7)
+    ),
+    'ROTATE_REFRESH_TOKENS': env('JWT_ROTATE_REFRESH_TOKENS', default=True, cast=bool),
+    'BLACKLIST_AFTER_ROTATION': env('JWT_BLACKLIST_AFTER_ROTATION', default=True, cast=bool),
+    'UPDATE_LAST_LOGIN': env('JWT_UPDATE_LAST_LOGIN', default=True, cast=bool),
+    'ALGORITHM': env('JWT_ALGORITHM', default='HS256'),
     'SIGNING_KEY': SECRET_KEY,
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
-# CORS Settings
-if DEBUG:
+# --- CORS Settings ---
+if IS_DEVELOPMENT:
     # Development: Allow all localhost origins
-    CORS_ALLOWED_ORIGINS = [
+    CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=[
         "http://localhost:5173",  # Vite default port
         "http://localhost:8081",  # Frontend port
         "http://localhost:3000",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:8081",
         "http://127.0.0.1:3000",
-    ]
+    ])
 else:
     # Production: Only allow configured frontend URL
-    frontend_url = os.getenv('FRONTEND_URL', '')
-    if frontend_url:
-        CORS_ALLOWED_ORIGINS = [frontend_url]
-    else:
-        # Fallback: allow from environment variable
-        cors_origins = os.getenv('CORS_ALLOWED_ORIGINS', '').split(',')
-        CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins if origin.strip()]
+    CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=[])
 
 CORS_ALLOW_CREDENTIALS = True
 # Additional CORS security
@@ -339,19 +374,19 @@ CORS_ALLOW_HEADERS = [
     'x-requested-with',
 ]
 # Prevent wildcard origins when credentials are allowed
-if not DEBUG and not CORS_ALLOWED_ORIGINS:
+if IS_PRODUCTION and not CORS_ALLOWED_ORIGINS:
     import warnings
     warnings.warn('CORS_ALLOWED_ORIGINS is empty in production! This will block all cross-origin requests.', UserWarning)
 
-# Security settings for production
-if not DEBUG:
+# --- Security Settings (Production) ---
+if IS_PRODUCTION:
     # CRITICAL: Tell Django to trust Azure App Service's reverse proxy headers
     # Azure App Service sits behind a reverse proxy, and Django needs to know
     # that requests are already HTTPS by checking the X-Forwarded-Proto header.
     # Without this, SECURE_SSL_REDIRECT will cause infinite redirect loops.
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     
-    SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'True') == 'True'  # Default to True in production
+    SECURE_SSL_REDIRECT = env('SECURE_SSL_REDIRECT', default=True, cast=bool)
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_BROWSER_XSS_FILTER = True
@@ -370,17 +405,31 @@ else:
     SESSION_COOKIE_SECURE = False
     CSRF_COOKIE_SECURE = False
 
-# Email Configuration
-EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
-EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
-EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
-EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
-EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@svaoauth.com')
+# --- Email Settings ---
+# Auto-configure email backend based on environment
+EMAIL_BACKEND_TYPE = env('EMAIL_BACKEND', default='smtp' if IS_PRODUCTION else 'console').lower()
 
-# Frontend URL for email verification links and OAuth redirects
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:8081')
+if EMAIL_BACKEND_TYPE == 'console' or (IS_DEVELOPMENT and EMAIL_BACKEND_TYPE != 'smtp'):
+    # Use console backend for development/testing
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+else:
+    # Use SMTP backend for production
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+    EMAIL_HOST = env('EMAIL_HOST', default='smtp.gmail.com')
+    EMAIL_PORT = env.int('EMAIL_PORT', default=587)
+    EMAIL_USE_TLS = env('EMAIL_USE_TLS', default=True, cast=bool)
+    EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='your-email@gmail.com')
+    EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='your-app-password')
+    DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='no-reply@yourdomain.com')
+
+# --- Frontend URL Configuration ---
+# This is used in email links (verification, password reset, etc.) and OAuth redirects
+# Set this in your environment variables for production
+if IS_DEVELOPMENT:
+    FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:8081')
+else:
+    # Production: use environment variable or default to getsva.com
+    FRONTEND_URL = env('FRONTEND_URL', default='https://getsva.com')
 
 # OAuth Provider Settings
 SOCIALACCOUNT_PROVIDERS = {

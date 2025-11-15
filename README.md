@@ -25,18 +25,48 @@ pip install -r requirements.txt
 
 ### 2. Environment Configuration
 
-Create a `.env` file in the backend directory (copy from `.env.example`):
+Create environment-specific configuration files:
 
+**For Local Development:**
 ```bash
-cp .env.example .env
+cp .env.local .env
 ```
 
-Edit `.env` and add your configuration:
+**For Production:**
+```bash
+cp .env.production .env
+```
 
-- **SECRET_KEY**: Generate a Django secret key
-- **EMAIL settings**: Configure for email verification
+The application automatically loads `.env.local` for development or `.env.production` for production based on the `ENVIRONMENT` variable.
+
+Edit the appropriate `.env` file and configure the following:
+
+#### Required for Development:
+- **DJANGO_SECRET_KEY**: Generate a Django secret key (or use default for dev)
+- **ENVIRONMENT**: Set to `development` for local development
+
+#### Required for Production:
+- **DJANGO_SECRET_KEY**: Generate a secure Django secret key
+- **ENVIRONMENT**: Set to `production`
+- **ALLOWED_HOSTS**: Comma-separated list of allowed hosts
+- **DATABASE_URL**: PostgreSQL connection string
+- **CORS_ALLOWED_ORIGINS**: Comma-separated list of allowed frontend origins
+- **EMAIL settings**: SMTP configuration for email verification
+- **INTERNAL_SERVICE_TOKEN**: Token for service-to-service communication
+- **DATA_TOKEN_SECRET**: Secret key for data tokens (must match sva_server)
+
+#### Optional Configuration:
+- **JWT_ACCESS_TOKEN_LIFETIME_HOURS**: Access token lifetime (default: 1 hour)
+- **JWT_REFRESH_TOKEN_LIFETIME_DAYS**: Refresh token lifetime (default: 7 days)
+- **FRONTEND_URL**: Frontend URL for email links and OAuth redirects
+- **CORE_CONSENT_URL**: URL for OAuth consent screen
+
+#### OAuth Provider Settings:
+OAuth credentials are configured via Django Admin or the `setup_oauth` management command:
 - **GOOGLE_CLIENT_ID** and **GOOGLE_CLIENT_SECRET**: From Google Cloud Console
 - **GITHUB_CLIENT_ID** and **GITHUB_CLIENT_SECRET**: From GitHub Developer Settings
+
+See `.env.local` or `.env.production` for a complete list of all available environment variables.
 
 ### 3. Database Migration
 
@@ -144,13 +174,15 @@ Update `CORS_ALLOWED_ORIGINS` in `config/settings.py` for additional origins.
 
 The API uses JWT tokens for authentication:
 
-- **Access Token**: Valid for 1 hour
-- **Refresh Token**: Valid for 7 days
+- **Access Token**: Valid for 1 hour (configurable via `JWT_ACCESS_TOKEN_LIFETIME_HOURS`)
+- **Refresh Token**: Valid for 7 days (configurable via `JWT_REFRESH_TOKEN_LIFETIME_DAYS`)
 
 Include tokens in requests:
 ```
 Authorization: Bearer <access_token>
 ```
+
+Token lifetimes can be configured via environment variables in `.env`.
 
 ## Project Structure
 
@@ -197,13 +229,35 @@ python manage.py runserver
 
 Before deploying to production:
 
-1. Set `DEBUG=False` in `.env`
-2. Generate a secure `SECRET_KEY`
-3. Configure proper `ALLOWED_HOSTS`
-4. Set up proper database (PostgreSQL recommended)
-5. Configure production email backend
-6. Set up static file serving
-7. Use HTTPS for OAuth callbacks
+1. Set `ENVIRONMENT=production` in `.env` (DEBUG will automatically be False)
+2. Generate a secure `DJANGO_SECRET_KEY`:
+   ```bash
+   python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
+   ```
+3. Configure `ALLOWED_HOSTS` (comma-separated list):
+   ```
+   ALLOWED_HOSTS=oauth-api.azurewebsites.net,oauth-api.getsva.com
+   ```
+4. Set up PostgreSQL database and configure `DATABASE_URL`
+5. Configure production email backend (SMTP settings)
+6. Set `CORS_ALLOWED_ORIGINS` to your production frontend URLs
+7. Configure `INTERNAL_SERVICE_TOKEN` and `DATA_TOKEN_SECRET` (must match sva_server)
+8. Set `FRONTEND_URL` and `CORE_CONSENT_URL` to production URLs
+9. Use HTTPS for OAuth callbacks
+10. Run `python manage.py collectstatic` to collect static files
+
+### Environment File Structure
+
+The application supports environment-specific configuration files:
+- **Development**: Copy `.env.local` to `.env` (or set `ENVIRONMENT=development`)
+- **Production**: Copy `.env.production` to `.env` (or set `ENVIRONMENT=production`)
+
+The system automatically loads:
+- `.env.local` when `ENVIRONMENT=development` (or defaults to development)
+- `.env.production` when `ENVIRONMENT=production`
+- Falls back to `.env` if the environment-specific file doesn't exist
+
+**Note**: The `ENVIRONMENT` variable can be set in the file itself or as a system environment variable (useful for deployment platforms like Azure App Service).
 
 ## License
 
