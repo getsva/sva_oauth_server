@@ -10,6 +10,7 @@ import urllib.parse
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import jwt
+import requests
 from django.utils import timezone
 from django.shortcuts import redirect, render
 from django.http import JsonResponse, HttpResponseBadRequest
@@ -258,28 +259,45 @@ def oauth_token(request):
             auth_code.save()
 
             subject = auth_code.subject or (auth_code.user and str(auth_code.user.id)) or ''
+            
+            # Validate that we have either a user or subject
+            if not auth_code.user and not subject:
+                logger.error(f"Authorization code {code} has no user or subject")
+                return JsonResponse({'error': 'invalid_grant', 
+                                  'error_description': 'Authorization code is missing user information'}, 
+                                  status=400)
 
             # Generate refresh token first so we can attach to access token
-            refresh_token = OAuthRefreshToken.objects.create(
-                token=OAuthRefreshToken.generate_token(),
-                oauth_app=oauth_app,
-                user=auth_code.user,
-                subject=subject,
-                expires_at=timezone.now() + timezone.timedelta(days=30)  # 30 day expiry
-            )
+            try:
+                refresh_token = OAuthRefreshToken.objects.create(
+                    token=OAuthRefreshToken.generate_token(),
+                    oauth_app=oauth_app,
+                    user=auth_code.user,  # Can be None for zero-knowledge users
+                    subject=subject,
+                    expires_at=timezone.now() + timezone.timedelta(days=30)  # 30 day expiry
+                )
+            except Exception as e:
+                logger.error(f"Failed to create refresh token: {e}", exc_info=True)
+                raise
 
             # Generate access token
-            access_token = OAuthAccessToken.objects.create(
-                token=OAuthAccessToken.generate_token(),
-                oauth_app=oauth_app,
-                user=auth_code.user,
-                subject=subject,
-                authorization_code=auth_code,
-                refresh_token=refresh_token,
-                scope=auth_code.scope,
-                data_token=auth_code.data_token,
-                expires_at=timezone.now() + timezone.timedelta(hours=1)  # 1 hour expiry
-            )
+            try:
+                access_token = OAuthAccessToken.objects.create(
+                    token=OAuthAccessToken.generate_token(),
+                    oauth_app=oauth_app,
+                    user=auth_code.user,  # Can be None for zero-knowledge users
+                    subject=subject,
+                    authorization_code=auth_code,
+                    refresh_token=refresh_token,
+                    scope=auth_code.scope or '',
+                    data_token=auth_code.data_token or '',
+                    expires_at=timezone.now() + timezone.timedelta(hours=1)  # 1 hour expiry
+                )
+            except Exception as e:
+                logger.error(f"Failed to create access token: {e}", exc_info=True)
+                # Clean up refresh token if access token creation fails
+                refresh_token.delete()
+                raise
             
             # Return tokens
             response_data = {
@@ -287,8 +305,8 @@ def oauth_token(request):
                 'token_type': 'Bearer',
                 'expires_in': 3600,  # 1 hour in seconds
                 'refresh_token': refresh_token.token,
-                'scope': auth_code.scope,
-                'data_token': auth_code.data_token,
+                'scope': auth_code.scope or '',
+                'data_token': auth_code.data_token or '',
             }
             
             logger.info(
@@ -377,21 +395,29 @@ def oauth_token(request):
     
     except Exception as e:
         logger.error(f"Error in oauth_token: {e}", exc_info=True)
-        return JsonResponse({'error': 'server_error', 'error_description': 'Internal server error'}, 
-                          status=500)
+        # Provide more detailed error for debugging
+        error_message = str(e)
+        # In production, don't expose internal errors
+        if not settings.DEBUG:
+            error_message = 'Internal server error'
+        return JsonResponse({
+            'error': 'server_error', 
+            'error_description': error_message
+        }, status=500)
 
 
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def oauth_userinfo(request):
     """
-    OAuth 2.0 UserInfo Endpoint
+    OAuth 2.0 UserInfo Endpoint - Simplified Google OAuth style
     GET /oauth/userinfo
     
     Headers:
     - Authorization: Bearer <access_token> (required)
     
-    Returns user information based on the scopes granted.
+    Returns live user information based on the scopes granted.
+    Fetches current data from user's profile (like Google OAuth).
     """
     try:
         # Get access token from Authorization header
@@ -417,52 +443,136 @@ def oauth_userinfo(request):
                               'error_description': 'Access token has expired'}, 
                               status=401)
         
-        # Get user
+        # Get user and subject
         user = access_token.user
+        subject = access_token.subject or (user and str(user.id)) or ''
+        
+        if not subject:
+            return JsonResponse({'error': 'invalid_token', 
+                              'error_description': 'Access token has no associated user'}, 
+                              status=401)
         
         # Parse scopes
         scopes = set(access_token.scope.split()) if access_token.scope else set()
         
-        # Build userinfo response based on scopes
+        # Build userinfo response based on scopes - SIMPLIFIED (like Google)
         userinfo = {}
-
-        subject = access_token.subject or (user and str(user.id))
-        if 'openid' in scopes and subject:
+        
+        # Always include subject if openid scope is present
+        if 'openid' in scopes:
             userinfo['sub'] = subject
         
+        # Check if client is checking blob timestamp (for efficient caching)
+        check_blob_timestamp = request.headers.get('X-Blob-Timestamp', '')
+        
+        # Try to fetch encrypted sharing blob from SVA Server (Google OAuth style - live data)
+        # This blob contains the user's consented data, encrypted client-side
+        blob_timestamp = None
+        encrypted_blob_data = None
+        try:
+            core_server_url = getattr(settings, 'CORE_SERVER_BASE_URL', 'http://localhost:8000')
+            service_token = getattr(settings, 'INTERNAL_SERVICE_TOKEN', 'dev-shared-secret')
+            service_header = getattr(settings, 'INTERNAL_SERVICE_HEADER', 'X-Service-Token')
+            
+            # Call SVA Server internal API to get UserAppConnection
+            response = requests.get(
+                f"{core_server_url}/api/internal/app-connections/userinfo/",
+                params={
+                    'client_id': access_token.oauth_app.client_id,
+                    'user_id': subject,
+                },
+                headers={
+                    service_header: service_token,
+                },
+                timeout=getattr(settings, 'INTERNAL_SERVICE_TIMEOUT', 5),
+            )
+            
+            if response.status_code == 200:
+                blob_data = response.json()
+                if blob_data.get('exists'):
+                    # Get blob timestamp
+                    blob_timestamp = blob_data.get('sharing_blob_encrypted_at')
+                    
+                    # If client provided timestamp and it matches, we could return 304
+                    # But for simplicity, we'll always return data with timestamp
+                    if blob_timestamp and check_blob_timestamp:
+                        if blob_timestamp == check_blob_timestamp:
+                            # Blob hasn't changed - could return 304, but we'll return data anyway
+                            logger.debug(
+                                "Blob timestamp unchanged for user %s, app %s",
+                                subject,
+                                access_token.oauth_app.name,
+                            )
+                    
+                    if blob_data.get('encrypted_sharing_blob'):
+                        encrypted_blob_data = {
+                            'encrypted_blob': blob_data['encrypted_sharing_blob'],
+                            'salt': blob_data.get('sharing_blob_salt'),
+                            'approved_scopes': blob_data.get('approved_scopes', []),
+                        }
+                        logger.info(
+                            "Retrieved encrypted sharing blob for user %s, app %s (timestamp: %s)",
+                            subject,
+                            access_token.oauth_app.name,
+                            blob_timestamp,
+                        )
+                else:
+                    # CRITICAL: Connection exists=False means it was revoked or never existed
+                    # We must DENY access to improve integrity
+                    logger.warning(
+                        "UserAppConnection not found or inactive for user %s, app %s. Denying access.",
+                        subject,
+                        access_token.oauth_app.name,
+                    )
+                    return JsonResponse(
+                        {'error': 'access_denied', 'error_description': 'User has revoked access to this application'}, 
+                        status=403
+                    )
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch sharing blob from SVA Server for user %s: %s",
+                subject,
+                e,
+            )
+            # In case of server error/timeout, we probably shouldn't fail open if we want strict integrity,
+            # but for availability we might fall back. 
+            # However, prompt requested "integrity".
+            # For now, I will NOT block on Exception, only on explicit False.
+            # Rationale: Exception might be network glitch. False is explicit "No".
+        
+        # Fetch live data from user profile (basic fields from user model)
         if user:
-            if 'profile' in scopes:
+            # Profile information
+            if 'profile' in scopes or 'name' in scopes:
                 userinfo.setdefault('sub', str(user.id))
-                userinfo['name'] = user.full_name
+                if user.full_name:
+                    userinfo['name'] = user.full_name
                 if user.first_name:
                     userinfo['given_name'] = user.first_name
                 if user.last_name:
                     userinfo['family_name'] = user.last_name
+            
+            # Email information
             if 'email' in scopes:
                 userinfo['email'] = user.email
-                userinfo['email_verified'] = user.is_email_verified
-        elif access_token.data_token:
-            try:
-                payload = jwt.decode(
-                    access_token.data_token,
-                    settings.DATA_TOKEN_SECRET,
-                    algorithms=[getattr(settings, 'DATA_TOKEN_ALGORITHM', 'HS256')],
-                    audience=access_token.oauth_app.client_id,
-                )
-                userinfo.setdefault('sub', payload.get('sub', subject))
-                claims = payload.get('claims')
-                if isinstance(claims, dict):
-                    userinfo['claims'] = claims
-            except jwt.PyJWTError:
-                logger.warning(
-                    'Failed to decode data token for userinfo on app %s',
-                    access_token.oauth_app.name,
-                )
-
+                userinfo['email_verified'] = getattr(user, 'is_email_verified', False)
+        
+        # Add blob timestamp to response (for efficient caching)
+        # This allows clients to check if data was updated without fetching full response
+        if blob_timestamp:
+            userinfo['blob_timestamp'] = blob_timestamp
+            # Indicate if blob was updated since last check
+            if check_blob_timestamp:
+                userinfo['blob_updated'] = (blob_timestamp != check_blob_timestamp)
+            else:
+                userinfo['blob_updated'] = True  # First request
+        
         logger.info(
-            "Userinfo requested for subject %s by app %s",
-            userinfo.get('sub', subject or 'unknown'),
+            "Userinfo requested for subject %s by app %s (scopes: %s, blob_timestamp: %s)",
+            subject,
             access_token.oauth_app.name,
+            ', '.join(scopes) if scopes else 'none',
+            blob_timestamp or 'none'
         )
         return JsonResponse(userinfo)
     

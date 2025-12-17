@@ -246,10 +246,10 @@ def consent_complete(request, auth_request_id=None):
     auth_request_id = auth_request_id or data.get('auth_request_id')
     user_id = data.get('user_id')
     approved_scopes = data.get('approved_scopes') or []
-    data_token = data.get('data_token')
+    data_token = data.get('data_token')  # Optional - simplified flow like Google OAuth
 
-    if not auth_request_id or not user_id or not data_token:
-        return Response({'detail': 'auth_request_id, user_id, and data_token are required'}, status=status.HTTP_400_BAD_REQUEST)
+    if not auth_request_id or not user_id:
+        return Response({'detail': 'auth_request_id and user_id are required'}, status=status.HTTP_400_BAD_REQUEST)
 
     if isinstance(approved_scopes, str):
         approved_scopes = [scope.strip() for scope in approved_scopes.split() if scope.strip()]
@@ -294,38 +294,43 @@ def consent_complete(request, auth_request_id=None):
             'detail': f'approved_scopes must be a subset of requested or configured scopes. Requested: {requested_scopes}, Configured: {list(configured_scopes)}, Approved: {approved_scopes}'
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    try:
-        decoded_token = jwt.decode(
-            data_token,
-            settings.DATA_TOKEN_SECRET,
-            algorithms=[getattr(settings, 'DATA_TOKEN_ALGORITHM', 'HS256')],
-            audience=auth_request.oauth_app.client_id,
-        )
-    except jwt.ExpiredSignatureError:
-        logger.warning('Data token expired for auth request %s', auth_request.id)
-        return Response({'detail': 'Data token has expired'}, status=status.HTTP_400_BAD_REQUEST)
-    except jwt.InvalidAudienceError:
-        logger.warning(
-            'Data token audience mismatch for auth request %s: expected %s',
-            auth_request.id,
-            auth_request.oauth_app.client_id,
-        )
-        return Response({'detail': 'Data token audience mismatch'}, status=status.HTTP_400_BAD_REQUEST)
-    except jwt.InvalidSignatureError:
-        logger.warning(
-            'Data token signature invalid for auth request %s (possible secret mismatch)',
-            auth_request.id,
-        )
-        return Response({'detail': 'Invalid data token signature'}, status=status.HTTP_400_BAD_REQUEST)
-    except jwt.PyJWTError as exc:
-        logger.warning('Failed to verify data token for auth request %s: %s', auth_request.id, exc)
-        return Response({'detail': 'Invalid data token'}, status=status.HTTP_400_BAD_REQUEST)
-
-    if decoded_token.get('sub') != str(user_id):
-        return Response({'detail': 'data_token subject mismatch'}, status=status.HTTP_400_BAD_REQUEST)
-
-    if decoded_token.get('auth_request_id') != str(auth_request.id):
-        return Response({'detail': 'data_token auth_request_id mismatch'}, status=status.HTTP_400_BAD_REQUEST)
+    # SIMPLIFIED: data_token is optional (like Google OAuth)
+    # If provided, validate it. If not, we'll fetch live data from user profile when needed
+    decoded_token = None
+    if data_token:
+        try:
+            decoded_token = jwt.decode(
+                data_token,
+                settings.DATA_TOKEN_SECRET,
+                algorithms=[getattr(settings, 'DATA_TOKEN_ALGORITHM', 'HS256')],
+                audience=auth_request.oauth_app.client_id,
+            )
+            # Validate token matches user and request
+            if decoded_token.get('sub') != str(user_id):
+                return Response({'detail': 'data_token subject mismatch'}, status=status.HTTP_400_BAD_REQUEST)
+            if decoded_token.get('auth_request_id') != str(auth_request.id):
+                return Response({'detail': 'data_token auth_request_id mismatch'}, status=status.HTTP_400_BAD_REQUEST)
+        except jwt.ExpiredSignatureError:
+            logger.warning('Data token expired for auth request %s', auth_request.id)
+            return Response({'detail': 'Data token has expired'}, status=status.HTTP_400_BAD_REQUEST)
+        except jwt.InvalidAudienceError:
+            logger.warning(
+                'Data token audience mismatch for auth request %s: expected %s',
+                auth_request.id,
+                auth_request.oauth_app.client_id,
+            )
+            return Response({'detail': 'Data token audience mismatch'}, status=status.HTTP_400_BAD_REQUEST)
+        except jwt.InvalidSignatureError:
+            logger.warning(
+                'Data token signature invalid for auth request %s (possible secret mismatch)',
+                auth_request.id,
+            )
+            return Response({'detail': 'Invalid data token signature'}, status=status.HTTP_400_BAD_REQUEST)
+        except jwt.PyJWTError as exc:
+            logger.warning('Failed to verify data token for auth request %s: %s', auth_request.id, exc)
+            return Response({'detail': 'Invalid data token'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        logger.info('Consent completed without data_token for auth request %s - will use live data', auth_request.id)
 
     # Use approved scopes if provided, otherwise use all requested scopes
     # If approved_scopes is empty, it means user denied - but we'll still create code with empty scopes
@@ -345,7 +350,7 @@ def consent_complete(request, auth_request_id=None):
         approved_scopes=approval_scope_text,
         code_challenge=auth_request.code_challenge,
         code_challenge_method=auth_request.code_challenge_method,
-        data_token=data_token,
+        data_token=data_token or '',  # Optional - can be empty for simplified flow
         auth_request=auth_request,
         expires_at=timezone.now() + timezone.timedelta(minutes=10),
     )
@@ -353,7 +358,7 @@ def consent_complete(request, auth_request_id=None):
     auth_request.status = OAuthAuthorizationRequest.STATUS_APPROVED
     auth_request.subject = str(user_id)
     auth_request.approved_scopes = approval_scope_text
-    auth_request.data_token = data_token
+    auth_request.data_token = data_token or ''  # Optional - can be empty
     auth_request.save(update_fields=['status', 'subject', 'approved_scopes', 'data_token', 'updated_at'])
 
     params = {'code': authorization_code.code}

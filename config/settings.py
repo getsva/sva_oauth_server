@@ -316,9 +316,11 @@ INTERNAL_SERVICE_TIMEOUT = env.int('INTERNAL_SERVICE_TIMEOUT', default=5)
 # Configure consent URL based on environment
 if IS_DEVELOPMENT:
     CORE_CONSENT_URL = env('CORE_CONSENT_URL', default='http://localhost:8080/consent')
+    CORE_SERVER_BASE_URL = env('CORE_SERVER_BASE_URL', default='http://localhost:8000')
 else:
     # Production: use environment variable or default production URL
     CORE_CONSENT_URL = env('CORE_CONSENT_URL', default='https://app.getsva.com/consent')
+    CORE_SERVER_BASE_URL = env('CORE_SERVER_BASE_URL', default='https://api.getsva.com')
 AUTHORIZATION_REQUEST_TTL_SECONDS = env.int('AUTHORIZATION_REQUEST_TTL_SECONDS', default=600)
 
 # JWT Settings
