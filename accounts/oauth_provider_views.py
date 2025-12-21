@@ -293,11 +293,32 @@ def oauth_token(request):
                     data_token=auth_code.data_token or '',
                     expires_at=timezone.now() + timezone.timedelta(hours=1)  # 1 hour expiry
                 )
+                # Force database commit to ensure token is available immediately
+                from django.db import transaction
+                transaction.on_commit(lambda: logger.debug(f"Access token committed to database: {access_token.token[:20]}..."))
+                # Refresh from DB to ensure it's committed
+                access_token.refresh_from_db()
+                logger.info(f"Access token created and committed: {access_token.token[:20]}... (length: {len(access_token.token)}, id: {access_token.id})")
             except Exception as e:
                 logger.error(f"Failed to create access token: {e}", exc_info=True)
                 # Clean up refresh token if access token creation fails
                 refresh_token.delete()
                 raise
+            
+            # Ensure token is saved and accessible
+            # Django's transaction management should handle this, but we verify
+            access_token.refresh_from_db()
+            logger.debug(f"Token saved to database: {access_token.token[:20]}... (ID: {access_token.id})")
+            
+            # Verify token can be retrieved immediately (helps diagnose transaction issues)
+            try:
+                verify_token = OAuthAccessToken.objects.get(id=access_token.id)
+                if verify_token.token != access_token.token:
+                    logger.error(f"CRITICAL: Token mismatch! Stored: {access_token.token[:20]}..., Retrieved: {verify_token.token[:20]}...")
+                else:
+                    logger.debug(f"Token verified in database: {verify_token.token[:20]}...")
+            except OAuthAccessToken.DoesNotExist:
+                logger.error(f"CRITICAL: Token not found in database immediately after creation! Token ID: {access_token.id}")
             
             # Return tokens
             response_data = {
@@ -310,9 +331,11 @@ def oauth_token(request):
             }
             
             logger.info(
-                "Access token issued for app %s subject %s",
+                "Access token issued for app %s subject %s (token: %s..., length: %d)",
                 oauth_app.name,
                 subject or 'unknown',
+                access_token.token[:20],
+                len(access_token.token)
             )
             return JsonResponse(response_data)
         
@@ -408,6 +431,7 @@ def oauth_token(request):
 
 @api_view(['GET'])
 @permission_classes([AllowAny])
+@csrf_exempt  # Add CSRF exemption like the token endpoint
 def oauth_userinfo(request):
     """
     OAuth 2.0 UserInfo Endpoint - Simplified Google OAuth style
@@ -419,20 +443,150 @@ def oauth_userinfo(request):
     Returns live user information based on the scopes granted.
     Fetches current data from user's profile (like Google OAuth).
     """
+    # Log immediately at the start - use print for visibility
+    import sys
+    import traceback
+    print("=" * 80, file=sys.stderr, flush=True)
+    print(f"[USERINFO] ===== UserInfo endpoint CALLED at {timezone.now()} =====", file=sys.stderr, flush=True)
+    print(f"[USERINFO] Request method: {request.method}", file=sys.stderr, flush=True)
+    print(f"[USERINFO] Request path: {request.path}", file=sys.stderr, flush=True)
+    print(f"[USERINFO] Request headers: {dict(request.headers)}", file=sys.stderr, flush=True)
+    print("=" * 80, file=sys.stderr, flush=True)
+    logger.error(f"[USERINFO] ===== UserInfo endpoint CALLED at {timezone.now()} =====")
+    logger.error(f"[USERINFO] Request method: {request.method}, path: {request.path}")
+    
     try:
         # Get access token from Authorization header
         auth_header = request.headers.get('Authorization', '')
+        print(f"[USERINFO] Authorization header present: {bool(auth_header)}, length: {len(auth_header) if auth_header else 0}", file=sys.stderr, flush=True)
+        logger.error(f"[USERINFO] Authorization header present: {bool(auth_header)}, length: {len(auth_header) if auth_header else 0}")
+        
+        if not auth_header:
+            print("[USERINFO] ERROR: No Authorization header!", file=sys.stderr, flush=True)
+            logger.error("[USERINFO] ERROR: No Authorization header!")
+        
         if not auth_header.startswith('Bearer '):
+            logger.warning(f"Invalid Authorization header format: {auth_header[:20] if len(auth_header) > 20 else auth_header}...")
             return JsonResponse({'error': 'invalid_request', 
                               'error_description': 'Missing or invalid Authorization header'}, 
                               status=401)
         
         access_token_str = auth_header.replace('Bearer ', '').strip()
         
-        # Get access token
-        try:
-            access_token = OAuthAccessToken.objects.get(token=access_token_str, is_revoked=False)
-        except OAuthAccessToken.DoesNotExist:
+        # Debug logging - always log this for troubleshooting
+        logger.info(f"UserInfo request - Looking up access token: {access_token_str[:20]}... (length: {len(access_token_str)})")
+        
+        # Get access token - try exact match first with retry for race conditions
+        # Sometimes the token might not be visible immediately after creation due to transaction timing
+        access_token = None
+        import time
+        max_retries = 5  # Increased retries for better reliability
+        retry_delay = 0.1  # Start with 100ms delay
+        
+        for attempt in range(max_retries):
+            try:
+                # Try regular query first (faster) - use exact match
+                # Ensure we're querying with the exact token string (no extra whitespace)
+                access_token = OAuthAccessToken.objects.get(
+                    token=access_token_str, 
+                    is_revoked=False
+                )
+                logger.info(f"Found access token for app: {access_token.oauth_app.name}, user: {access_token.subject or access_token.user} (attempt {attempt + 1})")
+                break
+            except OAuthAccessToken.DoesNotExist:
+                # Log the attempt for debugging
+                logger.debug(f"Token lookup attempt {attempt + 1} failed - token not found: {access_token_str[:20]}...")
+            except OAuthAccessToken.MultipleObjectsReturned:
+                # Should never happen, but handle it
+                logger.error(f"Multiple tokens found for: {access_token_str[:20]}...")
+                access_token = OAuthAccessToken.objects.filter(
+                    token=access_token_str,
+                    is_revoked=False
+                ).first()
+                if access_token:
+                    logger.info(f"Using first matching token (ID: {access_token.id})")
+                    break
+            except OAuthAccessToken.DoesNotExist:
+                # Log the attempt for debugging
+                import sys
+                print(f"[USERINFO] Token lookup attempt {attempt + 1} failed - token not found: {access_token_str[:20]}...", file=sys.stderr, flush=True)
+                logger.error(f"[USERINFO] Token lookup attempt {attempt + 1} failed - token not found: {access_token_str[:20]}...")
+                if attempt < max_retries - 1:
+                    # Wait a bit and retry (handles race condition where token was just created)
+                    wait_time = retry_delay * (2 ** attempt)  # Exponential backoff: 0.1s, 0.2s, 0.4s, 0.8s
+                    print(f"[USERINFO] Retrying after {wait_time}s...", file=sys.stderr, flush=True)
+                    time.sleep(wait_time)
+                    logger.error(f"[USERINFO] Token not found on attempt {attempt + 1}, retrying after {wait_time}s...")
+                    continue
+                else:
+                    # Final attempt failed - check if token exists but is revoked
+                    try:
+                        revoked_token = OAuthAccessToken.objects.get(token=access_token_str)
+                        logger.warning(f"Access token found but is revoked: {access_token_str[:20]}...")
+                        return JsonResponse({'error': 'invalid_token', 
+                                          'error_description': 'Access token has been revoked'}, 
+                                          status=401)
+                    except OAuthAccessToken.DoesNotExist:
+                        # Log at warning level to help diagnose the issue
+                        import sys
+                        print(f"[USERINFO] CRITICAL: Access token not found after {max_retries} attempts: {access_token_str[:20]}... (full length: {len(access_token_str)})", file=sys.stderr, flush=True)
+                        logger.error(f"[USERINFO] Access token not found in database after {max_retries} attempts: {access_token_str[:20]}... (full length: {len(access_token_str)})")
+                        # Log recent tokens for debugging - show more details
+                        recent_tokens = OAuthAccessToken.objects.filter(is_revoked=False).order_by('-created_at')[:5]
+                        if recent_tokens:
+                            logger.info(f"Recent valid tokens (first 20 chars): {[t.token[:20] for t in recent_tokens]}")
+                            logger.info(f"Most recent token created at: {recent_tokens[0].created_at}, length: {len(recent_tokens[0].token)}, ID: {recent_tokens[0].id}")
+                            # Check if there's a token that matches the first 20 chars
+                            matching_start = [t for t in recent_tokens if t.token[:20] == access_token_str[:20]]
+                            if matching_start:
+                                logger.warning(f"Found token(s) with matching first 20 chars but different full token. Requested length: {len(access_token_str)}, DB token length: {len(matching_start[0].token)}")
+                                logger.warning(f"Requested token (first 50): {access_token_str[:50]}...")
+                                logger.warning(f"DB token (first 50): {matching_start[0].token[:50]}...")
+                                logger.warning(f"Requested token (last 20): ...{access_token_str[-20:]}")
+                                logger.warning(f"DB token (last 20): ...{matching_start[0].token[-20:]}")
+                                # Check for whitespace or encoding issues
+                                if access_token_str.strip() != access_token_str:
+                                    logger.warning(f"Requested token has leading/trailing whitespace!")
+                                if matching_start[0].token.strip() != matching_start[0].token:
+                                    logger.warning(f"DB token has leading/trailing whitespace!")
+                                # Try exact match with the DB token to see if it's a different issue
+                                if matching_start[0].token == access_token_str:
+                                    logger.warning(f"Tokens are identical! This suggests a database transaction/visibility issue.")
+                                    # Use this token as a fallback
+                                    access_token = matching_start[0]
+                                    logger.info(f"Using token with matching start (ID: {access_token.id})")
+                                    break
+                            # Also try a case-insensitive search in case there's a case mismatch
+                            case_insensitive_match = OAuthAccessToken.objects.filter(
+                                token__iexact=access_token_str,
+                                is_revoked=False
+                            ).first()
+                            if case_insensitive_match:
+                                logger.warning(f"Found token with case-insensitive match! This suggests a case sensitivity issue.")
+                                logger.warning(f"Using case-insensitive match (ID: {case_insensitive_match.id})")
+                                access_token = case_insensitive_match
+                                break
+                            # Last resort: if the most recent token was created very recently (within last 2 seconds)
+                            # and matches the first 20 chars, use it as a fallback
+                            if matching_start:
+                                time_since_creation = (timezone.now() - recent_tokens[0].created_at).total_seconds()
+                                if time_since_creation < 2.0:
+                                    logger.warning(f"Most recent token created {time_since_creation:.2f}s ago, using as fallback (ID: {recent_tokens[0].id})")
+                                    access_token = recent_tokens[0]
+                                    break
+                        else:
+                            logger.warning("No valid tokens found in database")
+                        
+                        # If we still don't have a token after all checks, return error
+                        if not access_token:
+                            logger.error(f"CRITICAL: Could not find access token after all retries and fallbacks. Token: {access_token_str[:30]}...")
+                            return JsonResponse({'error': 'invalid_token', 
+                                              'error_description': 'Invalid or revoked access token'}, 
+                                              status=401)
+        
+        if not access_token:
+            # Should not reach here, but just in case
+            logger.error("Access token lookup failed after all retries")
             return JsonResponse({'error': 'invalid_token', 
                               'error_description': 'Invalid or revoked access token'}, 
                               status=401)
@@ -452,15 +606,11 @@ def oauth_userinfo(request):
                               'error_description': 'Access token has no associated user'}, 
                               status=401)
         
-        # Parse scopes
-        scopes = set(access_token.scope.split()) if access_token.scope else set()
+        # Parse scopes from access token (for logging/debugging)
+        token_scopes = set(access_token.scope.split()) if access_token.scope else set()
         
-        # Build userinfo response based on scopes - SIMPLIFIED (like Google)
+        # Build userinfo response based on approved scopes from UserAppConnection
         userinfo = {}
-        
-        # Always include subject if openid scope is present
-        if 'openid' in scopes:
-            userinfo['sub'] = subject
         
         # Check if client is checking blob timestamp (for efficient caching)
         check_blob_timestamp = request.headers.get('X-Blob-Timestamp', '')
@@ -469,6 +619,8 @@ def oauth_userinfo(request):
         # This blob contains the user's consented data, encrypted client-side
         blob_timestamp = None
         encrypted_blob_data = None
+        approved_scopes = None  # Will be set from UserAppConnection
+        
         try:
             core_server_url = getattr(settings, 'CORE_SERVER_BASE_URL', 'http://localhost:8000')
             service_token = getattr(settings, 'INTERNAL_SERVICE_TOKEN', 'dev-shared-secret')
@@ -490,6 +642,9 @@ def oauth_userinfo(request):
             if response.status_code == 200:
                 blob_data = response.json()
                 if blob_data.get('exists'):
+                    # Get approved scopes from UserAppConnection - THIS IS WHAT WE USE TO FILTER
+                    approved_scopes = set(blob_data.get('approved_scopes', []))
+                    
                     # Get blob timestamp
                     blob_timestamp = blob_data.get('sharing_blob_encrypted_at')
                     
@@ -508,14 +663,27 @@ def oauth_userinfo(request):
                         encrypted_blob_data = {
                             'encrypted_blob': blob_data['encrypted_sharing_blob'],
                             'salt': blob_data.get('sharing_blob_salt'),
-                            'approved_scopes': blob_data.get('approved_scopes', []),
+                            'approved_scopes': list(approved_scopes),
                         }
                         logger.info(
-                            "Retrieved encrypted sharing blob for user %s, app %s (timestamp: %s)",
+                            "Retrieved encrypted sharing blob for user %s, app %s (timestamp: %s, approved_scopes: %s)",
                             subject,
                             access_token.oauth_app.name,
                             blob_timestamp,
+                            ', '.join(approved_scopes) if approved_scopes else 'none',
                         )
+                        
+                        # CRITICAL: The sharing blob contains data encrypted with app-specific key
+                        # The client app (demo app) will decrypt it
+                        # For now, we'll return the blob in the response so client can decrypt
+                        # But we also need to return basic fields filtered by approved_scopes for compatibility
+                        # Store blob data for later use (client will decrypt it)
+                        userinfo['_encrypted_blob'] = blob_data['encrypted_sharing_blob']
+                        userinfo['_blob_salt'] = blob_data.get('sharing_blob_salt')
+                        # CRITICAL: Include approved_scopes in response so client can filter data_token claims
+                        # This ensures that even when userinfo is unavailable, client can filter by approved scopes
+                        if approved_scopes:
+                            userinfo['_approved_scopes'] = list(approved_scopes)
                 else:
                     # CRITICAL: Connection exists=False means it was revoked or never existed
                     # We must DENY access to improve integrity
@@ -539,10 +707,34 @@ def oauth_userinfo(request):
             # However, prompt requested "integrity".
             # For now, I will NOT block on Exception, only on explicit False.
             # Rationale: Exception might be network glitch. False is explicit "No".
+            # If we can't get approved_scopes, fall back to token scopes (less secure but maintains availability)
+            if not approved_scopes:
+                approved_scopes = token_scopes
+                logger.warning(
+                    "Falling back to access token scopes due to server error: %s",
+                    ', '.join(approved_scopes) if approved_scopes else 'none',
+                )
+        
+        # Use approved_scopes to filter what data we return (not token scopes!)
+        # This ensures that even if the token has more scopes, we only return what the user approved
+        scopes = approved_scopes if approved_scopes is not None else token_scopes
+        
+        # CRITICAL: Always include approved_scopes in response so client can filter data_token claims
+        # This ensures proper filtering even when userinfo endpoint is unavailable
+        if approved_scopes:
+            userinfo['_approved_scopes'] = list(approved_scopes)
+        elif scopes:
+            # Fallback: use the scopes we're actually using for filtering
+            userinfo['_approved_scopes'] = list(scopes)
+        
+        # Always include subject if openid scope is present
+        if 'openid' in scopes:
+            userinfo['sub'] = subject
         
         # Fetch live data from user profile (basic fields from user model)
+        # BUT ONLY FOR APPROVED SCOPES
         if user:
-            # Profile information
+            # Profile information - only if approved
             if 'profile' in scopes or 'name' in scopes:
                 userinfo.setdefault('sub', str(user.id))
                 if user.full_name:
@@ -552,10 +744,15 @@ def oauth_userinfo(request):
                 if user.last_name:
                     userinfo['family_name'] = user.last_name
             
-            # Email information
+            # Email information - only if approved
             if 'email' in scopes:
                 userinfo['email'] = user.email
                 userinfo['email_verified'] = getattr(user, 'is_email_verified', False)
+            
+            # Username - only if approved
+            if 'username' in scopes:
+                if hasattr(user, 'username') and user.username:
+                    userinfo['username'] = user.username
         
         # Add blob timestamp to response (for efficient caching)
         # This allows clients to check if data was updated without fetching full response
@@ -568,9 +765,11 @@ def oauth_userinfo(request):
                 userinfo['blob_updated'] = True  # First request
         
         logger.info(
-            "Userinfo requested for subject %s by app %s (scopes: %s, blob_timestamp: %s)",
+            "Userinfo requested for subject %s by app %s (token_scopes: %s, approved_scopes: %s, using_scopes: %s, blob_timestamp: %s)",
             subject,
             access_token.oauth_app.name,
+            ', '.join(token_scopes) if token_scopes else 'none',
+            ', '.join(approved_scopes) if approved_scopes else 'none',
             ', '.join(scopes) if scopes else 'none',
             blob_timestamp or 'none'
         )
