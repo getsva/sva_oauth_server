@@ -3,6 +3,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from . import views
 from . import credential_views
 from . import internal_views
+from . import dashboard_views
 
 urlpatterns = [
     # Custom authentication
@@ -56,6 +57,9 @@ urlpatterns = [
     # OAuth Consent Screen
     path('credentials/consent-screens/', credential_views.list_consent_screens, name='consent-screen-list'),
     path('credentials/oauth-apps/<int:oauth_app_id>/consent-screen/', credential_views.oauth_consent_screen, name='oauth-consent-screen'),
+
+    # Dashboard APIs & Services usage
+    path('dashboard/usage/', dashboard_views.dashboard_usage, name='dashboard-usage'),
 ]
 
 
