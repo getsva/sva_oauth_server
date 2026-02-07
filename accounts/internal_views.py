@@ -4,6 +4,7 @@ from urllib.parse import urlencode
 
 import jwt
 from django.conf import settings
+from django.db.utils import OperationalError
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -195,6 +196,12 @@ def auth_request_details(request):
         auth_request = OAuthAuthorizationRequest.objects.select_related('oauth_app').get(id=request_uuid)
     except OAuthAuthorizationRequest.DoesNotExist:
         return Response({'detail': 'Authorization request not found'}, status=status.HTTP_404_NOT_FOUND)
+    except OperationalError as e:
+        logger.warning('Database unavailable for auth-request-details: %s', e)
+        return Response(
+            {'detail': 'Database temporarily unavailable. Try again shortly.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
 
     if auth_request.is_expired and auth_request.status == OAuthAuthorizationRequest.STATUS_PENDING:
         auth_request.status = OAuthAuthorizationRequest.STATUS_EXPIRED
@@ -263,6 +270,12 @@ def consent_complete(request, auth_request_id=None):
         auth_request = OAuthAuthorizationRequest.objects.select_related('oauth_app').get(id=request_uuid)
     except OAuthAuthorizationRequest.DoesNotExist:
         return Response({'detail': 'Authorization request not found'}, status=status.HTTP_404_NOT_FOUND)
+    except OperationalError as e:
+        logger.warning('Database unavailable for consent-complete: %s', e)
+        return Response(
+            {'detail': 'Database temporarily unavailable. Try again shortly.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
 
     if auth_request.status != OAuthAuthorizationRequest.STATUS_PENDING:
         return Response({'detail': f'Request is {auth_request.status} and cannot be completed'}, status=status.HTTP_400_BAD_REQUEST)

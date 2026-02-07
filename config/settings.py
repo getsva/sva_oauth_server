@@ -187,13 +187,17 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # In production, DATABASE_URL should always be set
 database_url = env('DATABASE_URL', default='')
 if database_url:
-    DATABASES = {
-        'default': dj_database_url.config(
-            default=database_url,
-            conn_max_age=600,
-            ssl_require=env('DB_SSL_REQUIRE', default=False, cast=bool)
-        )
-    }
+    # Use DB_CONN_MAX_AGE=0 when DB has few connection slots (e.g. Azure PostgreSQL Basic)
+    # to avoid "remaining connection slots are reserved" errors. 0 = close after each request.
+    conn_max_age = env('DB_CONN_MAX_AGE', default=600, cast=int)
+    db_config = dj_database_url.config(
+        default=database_url,
+        conn_max_age=conn_max_age,
+        ssl_require=env('DB_SSL_REQUIRE', default=False, cast=bool)
+    )
+    if conn_max_age > 0:
+        db_config['CONN_HEALTH_CHECKS'] = True
+    DATABASES = {'default': db_config}
 else:
     # Fallback to SQLite for development or when DATABASE_URL is not set (e.g., during collectstatic)
     DATABASES = {
