@@ -18,7 +18,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.contrib.auth.decorators import login_required
 from django.conf import settings
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
@@ -330,12 +330,17 @@ def oauth_token(request):
                 'data_token': auth_code.data_token or '',
             }
             
+            # Debug: Log data_token presence
+            data_token_present = bool(auth_code.data_token)
+            data_token_len = len(auth_code.data_token) if auth_code.data_token else 0
             logger.info(
-                "Access token issued for app %s subject %s (token: %s..., length: %d)",
+                "Access token issued for app %s subject %s (token: %s..., length: %d, data_token_present: %s, data_token_len: %d)",
                 oauth_app.name,
                 subject or 'unknown',
                 access_token.token[:20],
-                len(access_token.token)
+                len(access_token.token),
+                data_token_present,
+                data_token_len
             )
             return JsonResponse(response_data)
         
@@ -430,6 +435,7 @@ def oauth_token(request):
 
 
 @api_view(['GET'])
+@authentication_classes([])  # Disable DRF auth - this endpoint uses its own OAuth token validation
 @permission_classes([AllowAny])
 @csrf_exempt  # Add CSRF exemption like the token endpoint
 def oauth_userinfo(request):

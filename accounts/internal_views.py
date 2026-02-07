@@ -367,11 +367,17 @@ def consent_complete(request, auth_request_id=None):
 
     redirect_url = f"{auth_request.redirect_uri}?{urlencode(params)}"
 
+    # Debug: Log data_token presence
+    data_token_present = bool(data_token)
+    data_token_len = len(data_token) if data_token else 0
     logger.info(
-        "Authorization request %s approved; code %s issued for app %s",
+        "Authorization request %s approved; code %s issued for app %s (data_token_present: %s, data_token_len: %d, approved_scopes: %s)",
         auth_request.id,
         authorization_code.code,
         auth_request.oauth_app.name,
+        data_token_present,
+        data_token_len,
+        approval_scope_text,
     )
     logger.info(
         "Redirecting to: %s",

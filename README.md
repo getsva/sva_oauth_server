@@ -131,10 +131,10 @@ The API will be available at `http://localhost:8001`
 3. Enable Google+ API and Google Identity API
 4. Go to "Credentials" → "Create Credentials" → "OAuth 2.0 Client ID"
 5. Set Application type to "Web application"
-6. Add authorized redirect URIs:
-   - `http://localhost:8001/accounts/google/login/callback/`
-   - `http://127.0.0.1:8001/accounts/google/login/callback/`
-7. Copy Client ID and Client Secret to `.env`:
+6. Add authorized redirect URIs (include both if you use backend and frontend flows):
+   - Backend callback: `http://localhost:8001/accounts/google/login/callback/`, `http://127.0.0.1:8001/accounts/google/login/callback/`
+   - Frontend callback (e.g. sva_oauth_client): `http://localhost:8081/auth/callback/google`, `http://127.0.0.1:8081/auth/callback/google`
+7. Copy Client ID and Client Secret to `.env.local` or `.env`:
    ```
    GOOGLE_CLIENT_ID=your-client-id
    GOOGLE_CLIENT_SECRET=your-client-secret
